@@ -1,6 +1,6 @@
 {
   "name": "waku-dispatcher",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "types": "./dist/index.d.ts",
   "module": "./dist/index.js",
   "type": "module",
@@ -11,7 +11,7 @@
     "@libp2p/bootstrap": "^9.0.9",
     "@waku/message-encryption": "^0.0.22",
     "@waku/sdk": "^0.0.20",
-    "ethers": "^6.8.0"
+    "ethers": "^6.8.1"
   },
   "scripts": {
     "build": "run-s build:**",

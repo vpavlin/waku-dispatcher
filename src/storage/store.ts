@@ -29,11 +29,14 @@ export class Store {
 
             db.onerror = (e:any) => {
                 console.error(e)
+                throw new Error("Failed to upgrade the DB")
             }
 
             const objectStore = db.createObjectStore("message", { keyPath: "hash" });
 
             objectStore.createIndex("direction", "direction", { unique: false})
+            objectStore.createIndex("contentTopic", "dmsg.contentTopic", { unique: false})
+
         }
     }
 
@@ -47,12 +50,13 @@ export class Store {
     }
 
     getAll = async () => {
-        return new Promise<StoreMsg[]>((resolve) => {
+        return new Promise<StoreMsg[]>((resolve, reject) => {
             const transaction = this.db!.transaction(["message"]);
             const objectStore = transaction.objectStore("message");
             const request = objectStore.getAll()
             request.onerror = (evt) => {
                 console.error(evt)
+                reject("Failed to query the DB")
             }
             request.onsuccess = () => {
                 const data: StoreMsg[] = request.result

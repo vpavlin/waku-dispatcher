@@ -14,6 +14,7 @@ import {
     Protocols,
 } from "@waku/interfaces"
 import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/crypto/ecies.js"
+import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/waku_payload.js"
 import { BaseWallet, ethers, keccak256 } from "ethers"
 import { Direction, Store } from "./storage/store.js"
 
@@ -47,6 +48,16 @@ type EmitCache = {
     encoder: IEncoder
 }
 
+enum KeyType {
+    Symmetric,
+    Asymetric
+}
+
+type Key = {
+    key: Uint8Array
+    type: KeyType
+}
+
 type MessageType = string
 type DispatchCallback = (payload: any, signer: Signer, meta: DispatchMetadata) => void
 
@@ -63,7 +74,7 @@ export class Dispatcher {
 
     running: boolean
 
-    decryptionKeys: Uint8Array[]
+    decryptionKeys: Key[]
     
     hearbeatInterval: NodeJS.Timeout | undefined
     subscription: IFilterSubscription | undefined
@@ -80,6 +91,13 @@ export class Dispatcher {
 
     store: Store
 
+    /**
+     * Dispatcher is a wrapper around js-waku SDK 
+     * @param node 
+     * @param contentTopic 
+     * @param ephemeral 
+     * @param store 
+     */
     constructor(node: LightNode, contentTopic: string, ephemeral: boolean, store: Store) {
         this.mapping = new Map<MessageType, DispachInfo[]>()
         this.node = node
@@ -100,7 +118,14 @@ export class Dispatcher {
         this.store = store
     }
 
-
+    /**
+     * Registers a callback/event handler executed upon a message delivery
+     * @param typ 
+     * @param callback 
+     * @param verifySender 
+     * @param acceptOnlyEcrypted 
+     * @returns 
+     */
     on = (typ: MessageType, callback: DispatchCallback, verifySender?: boolean, acceptOnlyEcrypted?: boolean) => {
         if (!this.mapping.has(typ)) {
             this.mapping.set(typ, [])
@@ -115,6 +140,10 @@ export class Dispatcher {
         this.mapping.set(typ, dispatchInfos!)
     }
 
+    /**
+     * Starts dispatcher
+     * @returns 
+     */
     start = async () => {
         if (this.running) return
         this.running = true
@@ -142,21 +171,46 @@ export class Dispatcher {
         this.mapping.clear()
     }
 
+    /**
+     * @returns {boolean}
+     */
     isRunning = (): boolean => {
         return this.running
     }
 
-    registerKey = (key: Uint8Array) => {
-        if (!this.decryptionKeys.find((k) => k == key)) this.decryptionKeys.push(key)
+    /**
+     * Registers a private key to use for message decryption. Can register multiple key
+     * @param key 
+     */
+    registerKey = (key: Uint8Array, type: KeyType = KeyType.Asymetric) => {
+        if (!this.decryptionKeys.find((k) => k.key == key && k.type == type)) this.decryptionKeys.push({key: key, type: type})
     }
 
-    dispatch = async (msg: IDecodedMessage, fromStorage: boolean = false) => {
+    private checkDuplicate = (hash: string):boolean => {
+        if (this.msgHashes.indexOf(hash) >= 0) {
+            console.debug("Message already delivered")
+            return true
+        }
+        if (this.msgHashes.length > 100) {
+            console.debug("Dropping old messages from hash cache")
+            this.msgHashes.slice(hash.length - 100, hash.length)
+        }
+        this.msgHashes.push(hash)
+        return false
+    }
+
+    private decrypt = async (msg: IDecodedMessage):Promise<[Uint8Array, boolean]> => {
         let msgPayload = msg.payload
         let encrypted = false
         if (this.decryptionKeys.length > 0) {
             for (const key of this.decryptionKeys) {
                 try {
-                    const buffer = await decrypt(key, msgPayload)
+                    let buffer: Uint8Array
+                    if (key.type == KeyType.Asymetric) {
+                        buffer = await decrypt(key.key, msgPayload)
+                    } else {
+                        buffer = await decryptSymmetric(msgPayload, key.key)
+                    }
                     msgPayload = new Uint8Array(buffer.buffer)
                     encrypted = true
                     break
@@ -167,17 +221,36 @@ export class Dispatcher {
             }
         }
 
+        return [msgPayload, encrypted]
+    }
+
+    private verifySender = (dmsg: IDispatchMessage): boolean => {
+        if (!dmsg.signature) {
+            console.error(`${dmsg.type}: Message requires verification, but signature is empty!`)
+            return false
+        }
+        const dmsgToVerify: IDispatchMessage = { type: dmsg.type, payload: dmsg.payload, timestamp: dmsg.timestamp, signature: undefined, signer: dmsg.signer, }
+        const signer = ethers.verifyMessage(JSON.stringify(dmsgToVerify), dmsg.signature)
+        if (signer != dmsg.signer) {
+            console.error(`${dmsg.type}: Invalid signer ${dmsg.signer} != ${signer}`)
+            return false
+        }
+
+        return true
+    }
+
+    /**
+     * Performs various processing and validation steps on the message (decryption, signature verification, deduplication...) and executes all registered callbacks for the message type
+     * @param msg 
+     * @param fromStorage 
+     * @returns 
+     */
+    dispatch = async (msg: IDecodedMessage, fromStorage: boolean = false) => {
+        const [msgPayload, encrypted] = await this.decrypt(msg)
+
         const input = new Uint8Array([...ethers.toUtf8Bytes(msg.contentTopic), ...msg.payload, ...ethers.toUtf8Bytes(msg.timestamp!.toString()), ...ethers.toUtf8Bytes(msg.pubsubTopic)])
-        const hash = keccak256(input).slice(0, 10)
-        if (this.msgHashes.indexOf(hash) >= 0) {
-            console.debug("Message already delivered")
-            return   
-        }
-        if (this.msgHashes.length > 100) {
-            console.debug("Dropping old messages from hash cache")
-            this.msgHashes.slice(hash.length - 100, hash.length)
-        }
-        this.msgHashes.push(hash)
+        const hash = keccak256(input)
+        if (this.checkDuplicate(hash)) return
 
         try {
             const dmsg: IDispatchMessage = JSON.parse(bytesToUtf8(msgPayload), reviver)
@@ -205,16 +278,7 @@ export class Dispatcher {
                 let payload = dmsg.payload
 
                 if (dispatchInfo.verifySender) {
-                    if (!dmsg.signature) {
-                        console.error(`${dmsg.type}: Message requires verification, but signature is empty!`)
-                        continue
-                    }
-                    const dmsgToVerify: IDispatchMessage = { type: dmsg.type, payload: dmsg.payload, timestamp: dmsg.timestamp, signature: undefined, signer: dmsg.signer, }
-                    const signer = ethers.verifyMessage(JSON.stringify(dmsgToVerify), dmsg.signature)
-                    if (signer != dmsg.signer) {
-                        console.error(`${dmsg.type}: Invalid signer ${dmsg.signer} != ${signer}`)
-                        continue
-                    }
+                    if (!this.verifySender(dmsg)) continue
                 }
 
                 this.lastDeliveredTimestamp = msg.timestamp?.getTime()|| Date.now()
@@ -238,7 +302,30 @@ export class Dispatcher {
         }
     }
 
-    emit = async (typ: MessageType, payload: any, wallet?: BaseWallet, encryptionPublicKey?: Uint8Array, ephemeral: boolean = this.ephemeralDefault) => {
+    /**
+     * Automatically chooses encoder to be used and executes `emitTo`
+     * @param typ 
+     * @param payload 
+     * @param wallet 
+     * @param encryptionPublicKey 
+     * @param ephemeral 
+     * @returns 
+     */
+    emit = async (typ: MessageType, payload: any, wallet?: BaseWallet, encryptionKey?: Uint8Array | Key, ephemeral: boolean = this.ephemeralDefault) => {
+        const encoder = ephemeral ? this.encoderEphemeral : this.encoder
+        return this.emitTo(encoder, typ, payload, wallet, encryptionKey)
+    }
+
+    /**
+     * Publishes a message to Waku network. Adds signature if a wallet is provided, encrypts the message if public key is provided
+     * @param encoder 
+     * @param typ 
+     * @param payload 
+     * @param wallet 
+     * @param encryptionKey 
+     * @returns 
+     */
+    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: BaseWallet, encryptionKey?: Uint8Array | Key) => {
         const dmsg: IDispatchMessage = {
             type: typ,
             payload: payload,
@@ -254,8 +341,21 @@ export class Dispatcher {
 
         console.debug(dmsg)
         let payloadArray = utf8ToBytes(JSON.stringify(dmsg, replacer))
-        if (encryptionPublicKey) {
-            const buffer = await encrypt(encryptionPublicKey, payloadArray)
+        let keyType = KeyType.Asymetric
+        let key: Uint8Array
+        if (encryptionKey) {
+            if (typeof encryptionKey == "object") {
+                 keyType = (encryptionKey as Key).type
+                 key = (encryptionKey as Key).key
+            } else {
+                key = encryptionKey
+            }
+            let buffer: Uint8Array
+            if (keyType == KeyType.Asymetric) {
+                buffer = await encrypt(key, payloadArray)
+            } else {
+                buffer = await encryptSymmetric(payloadArray, key)
+            }
             payloadArray = new Uint8Array(buffer.buffer)
         }
 
@@ -263,7 +363,6 @@ export class Dispatcher {
             payload: payloadArray
         }
 
-        const encoder = ephemeral ? this.encoderEphemeral : this.encoder
         const res = await this.node.lightPush.send(encoder, msg)
         /*if (res && res.errors && res.errors.length > 0) {
             msg.timestamp = new Date()
@@ -273,6 +372,9 @@ export class Dispatcher {
         return res
     }
 
+    /**
+     * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
+     */
     dispatchLocalQuery = async () => {
         let messages = await this.store.getAll()
         let msg
@@ -294,19 +396,30 @@ export class Dispatcher {
         //console.log(messages)
         for (let i = 0; i<messages.length; i++) {
             msg = messages[i]
+
+            //Ignore messages from different content topics - FIXME: Add index and do this in the DB query!
+            if (msg.dmsg.contentTopic != this.decoder.contentTopic) continue
             await this.dispatch(msg.dmsg, true)
             if (msg.dmsg.timestamp && msg.dmsg.timestamp > start)
                 start = msg.dmsg.timestamp
         }
 
-        if (start) {
-            while(!this.filterConnected) {console.log("sleeping"); await sleep(1_000)}
+        if (start.getTime() > 0) {
+            while(!this.filterConnected) {console.debug("sleeping"); await sleep(1_000)}
             let end = new Date() 
-            await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-3600*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
+            await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-360*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
+        } else {
+            await this.dispatchQuery()
         }
     }
 
+    /**
+     * Queries Waku Store protocol for past messages and dispatches them as if they were just delivered
+     * @param options 
+     * @param live 
+     */
     dispatchQuery = async (options: StoreQueryOptions = {pageDirection: PageDirection.FORWARD, pageSize: 20}, live: boolean = false) => {
+        console.debug(options)
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
             options
@@ -322,6 +435,10 @@ export class Dispatcher {
         }
     }
 
+    /**
+     * TBD
+     * @returns 
+     */
     emitFromCache = async () => {
         if (this.reemitting) return
         this.reemitting = true
@@ -344,6 +461,9 @@ export class Dispatcher {
 
     }
 
+    /**
+     * Sends`ping()` to the Filter node and if it fails attempts to recreate the subscribtion (as the node has probably dropped our subscription or went offline...)
+     */
     checkSubscription = async () => {
         if (this.subscription && !this.resubscribing) {
             this.resubscribing = true
@@ -391,6 +511,10 @@ export class Dispatcher {
         }
     }
 
+    /**
+     * 
+     * @returns Get basic information about current connection to Waku network
+     */
     getConnectionInfo = () => {
         return {
             connections: this.node.libp2p.getConnections(),

@@ -46,7 +46,7 @@ function App() {
     if (dispatcher) return;
 
     (async () => {
-      const d = await getDispatcher("/dispatcher-demo/0/example/json", "temperature", false)
+      const d = await getDispatcher(undefined, "/dispatcher-demo/0/example/json", "temperature", false)
       if (d === null) return
       setDispatcher(d)
     })()
