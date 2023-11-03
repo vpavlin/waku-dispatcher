@@ -22,6 +22,12 @@ There are other apps using Waku Dispatcher are:
 * [WakuLink](http://js-waku-helpers.vercel.app/)
 
 
+# Installation
+
+```
+npm install waku-dispatcher
+```
+
 ## More resources
 
 TBD:)
