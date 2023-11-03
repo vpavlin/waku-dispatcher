@@ -252,7 +252,6 @@ export class Dispatcher {
         const hash = keccak256(input)
         if (this.checkDuplicate(hash)) return
 
-
         try {
             const dmsg: IDispatchMessage = JSON.parse(bytesToUtf8(msgPayload), reviver)
             if (!dmsg.timestamp)
@@ -437,6 +436,10 @@ export class Dispatcher {
                     })
             );
         }
+    }
+
+    clearDuplicateCache = () => {
+        this.msgHashes = []
     }
 
     /**
