@@ -45,6 +45,7 @@ const getDispatcher = async (node: LightNode | undefined, contentTopic: string, 
     const store = new Store(`${dbName}-dispatcher`)
     dispatcher = new Dispatcher(node, contentTopic, ephemeral, store)
     await dispatcher.start()
+    console.debug("Dispatcher started")
 
     initializing = false
        
@@ -55,9 +56,9 @@ const getDispatcher = async (node: LightNode | undefined, contentTopic: string, 
  * Stops and destroys the Dispatcher instance
  * @returns 
  */
-export const destroyDispatcher = () => {
+export const destroyDispatcher = async () => {
     if (!dispatcher) return
-    dispatcher.stop()
+    await dispatcher.stop()
     dispatcher = null
 }
 

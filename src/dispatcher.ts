@@ -161,11 +161,11 @@ export class Dispatcher {
         //this.reemitInterval = setInterval(() => this.emitFromCache(), 10000)
     }
 
-    stop = () => {
+    stop = async () => {
         this.running = false
         if (this.hearbeatInterval) clearInterval(this.hearbeatInterval)
         //clearInterval(this.reemitInterval)
-        this.subscription?.unsubscribeAll()
+        await this.subscription?.unsubscribeAll()
         this.subscription = undefined
         this.msgHashes = []
         this.mapping.clear()
@@ -251,6 +251,7 @@ export class Dispatcher {
         const input = new Uint8Array([...ethers.toUtf8Bytes(msg.contentTopic), ...msg.payload, ...ethers.toUtf8Bytes(msg.timestamp!.toString()), ...ethers.toUtf8Bytes(msg.pubsubTopic)])
         const hash = keccak256(input)
         if (this.checkDuplicate(hash)) return
+
 
         try {
             const dmsg: IDispatchMessage = JSON.parse(bytesToUtf8(msgPayload), reviver)
@@ -398,7 +399,10 @@ export class Dispatcher {
             msg = messages[i]
 
             //Ignore messages from different content topics - FIXME: Add index and do this in the DB query!
-            if (msg.dmsg.contentTopic != this.decoder.contentTopic) continue
+            if (msg.dmsg.contentTopic != this.decoder.contentTopic) {
+                console.debug(`Ignoring msg - content topic mismatch: ${msg.dmsg.contentTopic} != ${this.decoder.contentTopic}`)
+                continue
+            }
             await this.dispatch(msg.dmsg, true)
             if (msg.dmsg.timestamp && msg.dmsg.timestamp > start)
                 start = msg.dmsg.timestamp
