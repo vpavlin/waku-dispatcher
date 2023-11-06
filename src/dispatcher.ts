@@ -344,11 +344,11 @@ export class Dispatcher {
         let keyType = KeyType.Asymetric
         let key: Uint8Array
         if (encryptionKey) {
-            if (typeof encryptionKey == "object") {
+            if (typeof encryptionKey == "object" && (encryptionKey as Key).key !== undefined) {
                  keyType = (encryptionKey as Key).type
                  key = (encryptionKey as Key).key
             } else {
-                key = encryptionKey
+                key = (encryptionKey as Uint8Array)
             }
             let buffer: Uint8Array
             if (keyType == KeyType.Asymetric) {
