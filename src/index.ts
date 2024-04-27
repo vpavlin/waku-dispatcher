@@ -1,8 +1,6 @@
 import { Protocols, createLightNode, waitForRemotePeer } from "@waku/sdk";
-import { LightNode } from "@waku/interfaces";
+import { LightNode, DefaultPubsubTopic } from "@waku/interfaces";
 import { Dispatcher } from "./dispatcher.js";
-import { bootstrap } from "@libp2p/bootstrap";
-import type { Libp2pOptions } from "libp2p";
 import { Store } from "./storage/store.js";
 
 let dispatcher: Dispatcher | null = null
@@ -17,27 +15,30 @@ let initializing = false
  * @param bootstrapNodes 
  * @returns 
  */
-const getDispatcher = async (node: LightNode | undefined, contentTopic: string, dbName: string, ephemeral: boolean, bootstrapNodes?: string[]) => {
+const getDispatcher = async (
+    node: LightNode | undefined,
+        contentTopic: string,
+        dbName: string,
+        ephemeral: boolean,
+        bootstrapNodes = [
+            "/dns4/node-01.do-ams3.status.prod.statusim.net/tcp/443/wss/p2p/16Uiu2HAm6HZZr7aToTvEBPpiys4UxajCTU97zj5v7RNR2gbniy1D",
+            "/dns4/node-02.do-ams3.status.prod.statusim.net/tcp/443/wss/p2p/16Uiu2HAmSve7tR5YZugpskMv2dmJAsMUKmfWYEKRXNUxRaTCnsXV",
+            "/dns4/node-01.ac-cn-hongkong-c.waku.test.statusim.net/tcp/8000/wss/p2p/16Uiu2HAkzHaTP5JsUwfR9NR8Rj9HC24puS6ocaU8wze4QrXr9iXp",
+        ]) => {
 
     if (dispatcher || initializing) {
         return dispatcher
     }
     initializing = true
 
-    let libp2p: Libp2pOptions | undefined = undefined 
-    if (bootstrapNodes) {
-        libp2p = {
-            peerDiscovery: [
-                bootstrap({ list: bootstrapNodes }),
-            ]
-        }
-    }
-
     if (!node) {
+        console.log("Setting up a node!")
         node = await createLightNode({
-            defaultBootstrap: true,
+            pubsubTopics: [DefaultPubsubTopic],
+            defaultBootstrap: false,
             pingKeepAlive: 60,
-            libp2p: libp2p,
+            bootstrapPeers: bootstrapNodes,
+            numPeersToUse: 3,
         })
         await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter, Protocols.Store])
     }
