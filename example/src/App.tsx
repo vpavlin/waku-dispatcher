@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import './App.css';
 import getDispatcher from "waku-dispatcher"
-import { DispatchMetadata, Dispatcher, Signer } from 'waku-dispatcher';
+import { DispatchMetadata, Dispatcher, Signer } from 'waku-dispatcher/dist';
 import Geohash from "latlon-geohash"
 import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet'
 
@@ -28,10 +28,13 @@ function App() {
 
   const [dispatcher, setDispatcher] = useState<Dispatcher>()
 
+  //const [info, setInfo] = useState<any>()
+
   const send  = async () => {
     if (!dispatcher || !temp || !unit || !geo) return
 
-    dispatcher.emit("hello", {temperature: temp, unit: unit, timestamp: new Date(), location: geo} as TemperatureMsg)
+    const res = await dispatcher.emit("hello", {temperature: temp, unit: unit, timestamp: new Date(), location: geo} as TemperatureMsg)
+    console.log(res)
   }
 
   const getLocation = () =>{
@@ -48,6 +51,7 @@ function App() {
     (async () => {
       const d = await getDispatcher(undefined, "/dispatcher-demo/0/example/json", "temperature", false)
       if (d === null) return
+      
       setDispatcher(d)
     })()
   }, [])
@@ -56,10 +60,20 @@ function App() {
     if (!dispatcher) return
 
     dispatcher.on("hello", (msg:TemperatureMsg, signer: Signer, meta: DispatchMetadata) => {
+      console.log("received")
       setRecord((x) => [...x, msg])
     })
     dispatcher.dispatchLocalQuery()
   },[dispatcher])
+
+  /*useEffect(() => {
+    if (!dispatcher) return;
+
+    (async () => {
+      setInfo(await dispatcher.getConnectionInfo())
+    }
+    )()
+  }, [dispatcher])*/
 
   return (
     <div className="App">
@@ -93,12 +107,16 @@ function App() {
       <div>
         {records.map((r, i) => <div key={i.toString()}>{r.temperature} ˚{r.unit} ({r.location}, {r.timestamp.toLocaleString()})</div>)}
       </div>
+     
     </div>
   );
 }
 
 export default App;
 
+/*<!-- <pre>
+        {JSON.stringify(info, undefined, 2)}
+      </pre>*/
 
 /*
    <MapContainer style={{width: "600px", height: "400px", margin: "1rem auto", position: "relative"}} center={[45.0519926878143, 6.201351588162976]} zoom={7} >

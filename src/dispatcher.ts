@@ -12,9 +12,11 @@ import {
     IEncoder,
     IDecoder,
     Protocols,
+    Unsubscribe,
+    DefaultPubsubTopic,
 } from "@waku/interfaces"
 import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/crypto/ecies.js"
-import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/waku_payload.js"
+import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/symmetric.js"
 import { BaseWallet, ethers, keccak256 } from "ethers"
 import { Direction, Store } from "./storage/store.js"
 
@@ -48,12 +50,12 @@ type EmitCache = {
     encoder: IEncoder
 }
 
-enum KeyType {
+export enum KeyType {
     Symmetric,
     Asymetric
 }
 
-type Key = {
+export type Key = {
     key: Uint8Array
     type: KeyType
 }
@@ -67,6 +69,7 @@ const DEFAULT_SUBSCRIBE_RETRY_MS = 5000
 export class Dispatcher {
     mapping: Map<MessageType, DispachInfo[]>
     node: LightNode
+    contentTopic: string
     decoder: IDecoder<IDecodedMessage>
     encoder: IEncoder
     encoderEphemeral: IEncoder
@@ -75,11 +78,14 @@ export class Dispatcher {
     running: boolean
 
     decryptionKeys: Key[]
+    autoEncrypt: boolean = false
+    autoEncryptKeyId: number | undefined = undefined
     
     hearbeatInterval: NodeJS.Timeout | undefined
     subscription: IFilterSubscription | undefined
     resubscribing: boolean = false
     resubscribeAttempts: number = 0
+    unsubscribe: undefined | Unsubscribe = undefined 
     
     filterConnected:boolean = false
     lastDeliveredTimestamp:number | undefined= undefined 
@@ -101,14 +107,15 @@ export class Dispatcher {
     constructor(node: LightNode, contentTopic: string, ephemeral: boolean, store: Store) {
         this.mapping = new Map<MessageType, DispachInfo[]>()
         this.node = node
+        this.contentTopic = contentTopic
 
      
-        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false })
+        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, pubsubTopic: DefaultPubsubTopic, ephemeral: true })
+        this.encoder = createEncoder({ contentTopic: contentTopic, pubsubTopic: DefaultPubsubTopic, ephemeral: false })
 
 
         this.ephemeralDefault = ephemeral
-        this.decoder = createDecoder(contentTopic)
+        this.decoder = createDecoder(contentTopic, DefaultPubsubTopic)
         this.running = false
         this.decryptionKeys = []
 
@@ -116,6 +123,8 @@ export class Dispatcher {
         this.hearbeatInterval = undefined
 
         this.store = store
+
+
     }
 
     /**
@@ -133,7 +142,7 @@ export class Dispatcher {
         const dispatchInfos = this.mapping.get(typ)
         const newDispatchInfo = { callback: callback, verifySender: !!verifySender, acceptOnlyEncrypted: !!acceptOnlyEcrypted }
         if (dispatchInfos?.find((di) => di.callback.toString() == newDispatchInfo.callback.toString())) {
-            console.log("Skipping the callback setup - already exists")
+            console.warn("Skipping the callback setup - already exists")
             return
         }
         dispatchInfos?.push(newDispatchInfo)
@@ -148,16 +157,23 @@ export class Dispatcher {
         if (this.running) return
         this.running = true
         //await this.node.start()
-        await waitForRemotePeer(this.node, [Protocols.LightPush, Protocols.Filter])
-        this.subscription = await this.node.filter.createSubscription()
-        await this.subscription.subscribe(this.decoder, this.dispatch)
-        this.filterConnected = true
-        this.node.libp2p.addEventListener("peer:disconnect", async (e) => {
-            console.log("Peer disconnected, check subscription!")
-            console.log(e.detail.toString())
-            await this.checkSubscription()
+        await waitForRemotePeer(this.node, [Protocols.LightPush, Protocols.Filter, Protocols.Store])
+        
+        this.node.libp2p.addEventListener("peer:disconnect", async (e:any) => {
+            console.debug("Peer disconnected, check subscription!")
+            console.debug(e.detail.toString())
+            //await this.checkSubscription()
         })
         this.hearbeatInterval = setInterval(() => this.checkSubscription(), 10000)
+
+
+        try {
+            this.subscription = await this.node.filter.createSubscription(DefaultPubsubTopic)
+            await this.subscription.subscribe(this.decoder, this.dispatch)
+            this.filterConnected = true
+        } catch (e){
+            console.error(e)
+        }
         //this.reemitInterval = setInterval(() => this.emitFromCache(), 10000)
     }
 
@@ -165,7 +181,8 @@ export class Dispatcher {
         this.running = false
         if (this.hearbeatInterval) clearInterval(this.hearbeatInterval)
         //clearInterval(this.reemitInterval)
-        await this.subscription?.unsubscribeAll()
+        //await this.subscription?.unsubscribeAll()
+        if (this.unsubscribe) await this.unsubscribe()
         this.subscription = undefined
         this.msgHashes = []
         this.mapping.clear()
@@ -182,8 +199,14 @@ export class Dispatcher {
      * Registers a private key to use for message decryption. Can register multiple key
      * @param key 
      */
-    registerKey = (key: Uint8Array, type: KeyType = KeyType.Asymetric) => {
-        if (!this.decryptionKeys.find((k) => k.key == key && k.type == type)) this.decryptionKeys.push({key: key, type: type})
+    registerKey = (key: Uint8Array, type: KeyType = KeyType.Asymetric, autoEncrypt: boolean = false) => {
+        if (!this.decryptionKeys.find((k) => k.key == key && k.type == type)) {
+            this.decryptionKeys.push({key: key, type: type})
+            if (autoEncrypt) {
+                this.autoEncrypt = true
+                this.autoEncryptKeyId = this.decryptionKeys.length - 1
+            }
+        }
     }
 
     private checkDuplicate = (hash: string):boolean => {
@@ -271,7 +294,7 @@ export class Dispatcher {
 
             for (const dispatchInfo of dispatchInfos) {
                 if (dispatchInfo.acceptOnlyEncrypted && !encrypted) {
-                    console.log(`Message not encrypted, skipping (type: ${dmsg.type})`)
+                    console.info(`Message not encrypted, skipping (type: ${dmsg.type})`)
                     continue
                 }
 
@@ -343,12 +366,18 @@ export class Dispatcher {
         let payloadArray = utf8ToBytes(JSON.stringify(dmsg, replacer))
         let keyType = KeyType.Asymetric
         let key: Uint8Array
+
+        if (!encryptionKey && this.autoEncrypt && this.autoEncryptKeyId !== undefined) {
+            encryptionKey = this.decryptionKeys[this.autoEncryptKeyId]
+        }
+
         if (encryptionKey) {
-            if (typeof encryptionKey == "object") {
+            console.debug("Will encrypt")
+            if (typeof encryptionKey == "object" && (encryptionKey as Key).key !== undefined) {
                  keyType = (encryptionKey as Key).type
                  key = (encryptionKey as Key).key
             } else {
-                key = encryptionKey
+                key = (encryptionKey as Uint8Array)
             }
             let buffer: Uint8Array
             if (keyType == KeyType.Asymetric) {
@@ -453,9 +482,9 @@ export class Dispatcher {
             const l = this.emitCache.length
             for (let i = 0; i < l; i++) {
                 const toEmit = this.emitCache[0]
-                console.log("Trying to emit failed message from "+toEmit.msg.timestamp)
+                console.info("Trying to emit failed message from "+toEmit.msg.timestamp)
                 const res = await this.node.lightPush.send(toEmit.encoder, toEmit.msg)
-                if (res && res.errors && res.errors.length > 0) {
+                if (res && res.failures && res.failures.length > 0) {
                     break
                 }
 
@@ -471,17 +500,17 @@ export class Dispatcher {
     /**
      * Sends`ping()` to the Filter node and if it fails attempts to recreate the subscribtion (as the node has probably dropped our subscription or went offline...)
      */
-    checkSubscription = async () => {
+    checkSubscription = async () => {        
         if (this.subscription && !this.resubscribing) {
             this.resubscribing = true
             try {
                 await this.subscription.ping();
             } catch (error) {
+                console.error(error)
                 this.filterConnected = false
                 const start = new Date()
                 while(true) {
-                    console.log("Resubscribing!")
-                    console.log(this.subscription)
+                    console.debug("Resubscribing!")
                     
                     //await this.subscription.unsubscribeAll()
                     try {
@@ -490,18 +519,19 @@ export class Dispatcher {
                                 if (this.subscription)
                                     await this.subscription.unsubscribeAll()
                             } catch (unE) {
-                                console.log(unE)
+                                console.error(unE)
                             } finally {
                                 this.subscription = undefined
                             }
                             this.subscription = await this.node.filter.createSubscription()
-                            console.log("Created new subscription")
+                            console.debug("Created new subscription")
                         }
 
+                        console.debug("Trying to subscribe...")
                         await this.subscription.subscribe([this.decoder], this.dispatch)
-                        console.log("Resubscribed")
+                        console.debug("Resubscribed")
                         const end = new Date()
-                        console.log(`Query: ${start.toString()} -> ${end.toString()}`)
+                        console.debug(`Query: ${start.toString()} -> ${end.toString()}`)
                         await this.dispatchQuery({timeFilter: {startTime: new Date(start.setSeconds(start.getSeconds()-120)), endTime: end}}, true)
                         break;
                     } catch (e) {
@@ -522,9 +552,11 @@ export class Dispatcher {
      * 
      * @returns Get basic information about current connection to Waku network
      */
-    getConnectionInfo = () => {
+    getConnectionInfo = async () => {
         return {
             connections: this.node.libp2p.getConnections(),
+            filterConnections: await this.node.filter.connectedPeers(),
+            //lightpushConnections: await this.node.lightPush.connectedPeers(),
             subscription: this.filterConnected,
             subsciptionAttempts: this.resubscribeAttempts,
             lastDelivered: this.lastDeliveredTimestamp
