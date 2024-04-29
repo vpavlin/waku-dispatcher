@@ -17,7 +17,7 @@ import {
 } from "@waku/interfaces"
 import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/crypto/ecies.js"
 import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/symmetric.js"
-import { BaseWallet, ethers, keccak256 } from "ethers"
+import { Wallet, ethers, keccak256 } from "ethers"
 import { Direction, Store } from "./storage/store.js"
 
 
@@ -334,7 +334,7 @@ export class Dispatcher {
      * @param ephemeral 
      * @returns 
      */
-    emit = async (typ: MessageType, payload: any, wallet?: BaseWallet, encryptionKey?: Uint8Array | Key, ephemeral: boolean = this.ephemeralDefault) => {
+    emit = async (typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key, ephemeral: boolean = this.ephemeralDefault) => {
         const encoder = ephemeral ? this.encoderEphemeral : this.encoder
         return this.emitTo(encoder, typ, payload, wallet, encryptionKey)
     }
@@ -348,7 +348,7 @@ export class Dispatcher {
      * @param encryptionKey 
      * @returns 
      */
-    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: BaseWallet, encryptionKey?: Uint8Array | Key) => {
+    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key) => {
         const dmsg: IDispatchMessage = {
             type: typ,
             payload: payload,
@@ -441,7 +441,9 @@ export class Dispatcher {
             let end = new Date() 
             await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-360*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
         } else {
-            await this.dispatchQuery()
+            let start = new Date()
+            let end = new Date()
+            await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-8*3600*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
         }
     }
 
