@@ -62,8 +62,6 @@ export type Key = {
 type MessageType = string
 type DispatchCallback = (payload: any, signer: Signer, meta: DispatchMetadata) => void
 
-const MAX_RESUBSCRIBE_ATTEMPTS = 5
-const DEFAULT_SUBSCRIBE_RETRY_MS = 5000
 
 export class Dispatcher {
     mapping: Map<MessageType, DispachInfo[]>
@@ -82,9 +80,9 @@ export class Dispatcher {
     
     hearbeatInterval: NodeJS.Timeout | undefined
     subscription: ISubscriptionSDK | null
-    resubscribing: boolean = false
-    resubscribeAttempts: number = 0
     unsubscribe: undefined | Unsubscribe = undefined 
+
+    lastSuccessfulQuery: Date = new Date()
     
     filterConnected:boolean = false
     lastDeliveredTimestamp:number | undefined= undefined 
@@ -163,7 +161,7 @@ export class Dispatcher {
             console.debug(e.detail.toString())
             //await this.checkSubscription()
         })
-        //this.hearbeatInterval = setInterval(() => this.checkSubscription(), 10000)
+        this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 30000)
 
 
         try {
@@ -409,9 +407,7 @@ export class Dispatcher {
      * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
      */
     dispatchLocalQuery = async () => {
-        console.log("reading")
         let messages = await this.store.getAll()
-        console.log("finished readin")
         let msg
         let start = new Date(0)
 
@@ -459,7 +455,7 @@ export class Dispatcher {
      * @param live 
      */
     dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic]}, live: boolean = false) => {
-        console.debug(this.decoder)
+        console.log(options)
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
             options
@@ -472,6 +468,15 @@ export class Dispatcher {
                             await this.dispatch(msg, !live)
                     })
             );
+        }
+    }
+
+    dispatchRegularQuery = async () => {
+        try {
+            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: this.lastSuccessfulQuery, timeEnd: new Date()})
+            this.lastSuccessfulQuery = new Date()
+        } catch (ex) {
+            console.error(ex)
         }
     }
 
@@ -506,67 +511,6 @@ export class Dispatcher {
     }
 
     /**
-     * Sends`ping()` to the Filter node and if it fails attempts to recreate the subscribtion (as the node has probably dropped our subscription or went offline...)
-     */
-    checkSubscription = async () => {        
-        if (this.subscription && !this.resubscribing) {
-            console.log("resubscribing")
-            this.resubscribing = true
-            try {
-                console.log("pinging")
-                const result = await this.subscription.ping();
-                if (result.failures.length > 0) {
-                    throw new Error("ping failed");
-                    
-                }
-            } catch (error) {
-                console.error(error)
-                this.filterConnected = false
-                const start = new Date()
-                while(true) {
-                    console.debug("Resubscribing!")
-                    
-                    //await this.subscription.unsubscribeAll()
-                    try {
-                        if (this.resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS || !this.subscription) {
-                            try {
-                                if (this.subscription)
-                                    await this.subscription.unsubscribeAll()
-                            } catch (unE) {
-                                console.error(unE)
-                            } finally {
-                                this.subscription = null
-                            }
-                            console.debug("Trying to subscribe...")
-                            const subResult = await this.node.filter.subscribe([this.decoder], this.dispatch)
-                            if (subResult.error) {
-                                console.error(subResult.error)
-                                throw new Error(subResult.error);
-                                
-                            }
-                            this.subscription = subResult.subscription
-                            console.debug("Created new subscription")
-                        }
-
-                        const end = new Date()
-                        console.debug(`Query: ${start.toString()} -> ${end.toString()}`)
-                        await this.dispatchQuery({timeStart: new Date(start.setSeconds(start.getSeconds()-120)), timeEnd: end, includeData: true, contentTopics: [this.contentTopic], pubsubTopic: this.decoder.pubsubTopic, paginationForward: true}, true)
-                        break;
-                    } catch (e) {
-                        console.debug("Failed to resubscribe: " + e)
-                        this.resubscribeAttempts++
-                    }
-                    await sleep(DEFAULT_SUBSCRIBE_RETRY_MS * this.resubscribeAttempts)
-                }
-            } finally {
-                this.resubscribeAttempts = 0
-                this.resubscribing = false
-                this.filterConnected = true
-            }
-        }
-    }
-
-    /**
      * 
      * @returns Get basic information about current connection to Waku network
      */
@@ -576,7 +520,6 @@ export class Dispatcher {
             //filterConnections: await this.node.filter.connectedPeers(),
             //lightpushConnections: await this.node.lightPush.connectedPeers(),
             subscription: this.filterConnected,
-            subsciptionAttempts: this.resubscribeAttempts,
             lastDelivered: this.lastDeliveredTimestamp
         }
     }

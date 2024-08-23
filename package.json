@@ -10,12 +10,7 @@
   "dependencies": {
     "@libp2p/crypto": "^4.0.3",
     "@waku/message-encryption": "next",
-    "@waku/sdk": "next",
-    "@waku/interfaces": "next",
-    "@waku/core": "next",
-    "@waku/discovery": "next",
-    "@waku/enr": "next",
-    "@waku/relay": "next",
+    "@waku/sdk": "0.0.27-39f8920.0",
     "ethers": "^6.12.0"
   },
   "scripts": {
