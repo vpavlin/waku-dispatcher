@@ -1,4 +1,4 @@
-import { LightNode, IDecodedMessage, StoreQueryOptions, IFilterSubscription, PageDirection } from "@waku/interfaces"
+import { LightNode, IDecodedMessage, QueryRequestParams, ISubscriptionSDK } from "@waku/interfaces"
 import {
     bytesToUtf8,
     createDecoder,
@@ -13,7 +13,6 @@ import {
     IDecoder,
     Protocols,
     Unsubscribe,
-    DefaultPubsubTopic,
 } from "@waku/interfaces"
 import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/crypto/ecies.js"
 import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/symmetric.js"
@@ -82,7 +81,7 @@ export class Dispatcher {
     autoEncryptKeyId: number | undefined = undefined
     
     hearbeatInterval: NodeJS.Timeout | undefined
-    subscription: IFilterSubscription | undefined
+    subscription: ISubscriptionSDK | null
     resubscribing: boolean = false
     resubscribeAttempts: number = 0
     unsubscribe: undefined | Unsubscribe = undefined 
@@ -110,16 +109,16 @@ export class Dispatcher {
         this.contentTopic = contentTopic
 
      
-        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, pubsubTopic: DefaultPubsubTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, pubsubTopic: DefaultPubsubTopic, ephemeral: false })
+        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
+        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false })
 
 
         this.ephemeralDefault = ephemeral
-        this.decoder = createDecoder(contentTopic, DefaultPubsubTopic)
+        this.decoder = createDecoder(contentTopic)
         this.running = false
         this.decryptionKeys = []
 
-        this.subscription = undefined
+        this.subscription = null
         this.hearbeatInterval = undefined
 
         this.store = store
@@ -164,12 +163,17 @@ export class Dispatcher {
             console.debug(e.detail.toString())
             //await this.checkSubscription()
         })
-        this.hearbeatInterval = setInterval(() => this.checkSubscription(), 10000)
+        //this.hearbeatInterval = setInterval(() => this.checkSubscription(), 10000)
 
 
         try {
-            this.subscription = await this.node.filter.createSubscription(DefaultPubsubTopic)
-            await this.subscription.subscribe(this.decoder, this.dispatch)
+        
+            const subResult = await this.node.filter.subscribe(this.decoder, this.dispatch)
+            if (subResult.error) {
+                throw new Error(subResult.error);
+            }
+            this.subscription = subResult.subscription
+            
             this.filterConnected = true
         } catch (e){
             console.error(e)
@@ -183,7 +187,7 @@ export class Dispatcher {
         //clearInterval(this.reemitInterval)
         //await this.subscription?.unsubscribeAll()
         if (this.unsubscribe) await this.unsubscribe()
-        this.subscription = undefined
+        this.subscription = null
         this.msgHashes = []
         this.mapping.clear()
     }
@@ -405,7 +409,9 @@ export class Dispatcher {
      * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
      */
     dispatchLocalQuery = async () => {
+        console.log("reading")
         let messages = await this.store.getAll()
+        console.log("finished readin")
         let msg
         let start = new Date(0)
 
@@ -422,7 +428,7 @@ export class Dispatcher {
 
             return 1 
         })
-        //console.log(messages)
+        console.log(messages)
         for (let i = 0; i<messages.length; i++) {
             msg = messages[i]
 
@@ -439,11 +445,11 @@ export class Dispatcher {
         if (start.getTime() > 0) {
             while(!this.filterConnected) {console.debug("sleeping"); await sleep(1_000)}
             let end = new Date() 
-            await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-360*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
+            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-360*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
         } else {
             let start = new Date()
             let end = new Date()
-            await this.dispatchQuery({pageDirection: PageDirection.FORWARD, pageSize: 20, timeFilter: {startTime: new Date(start.setTime(start.getTime()-8*3600*1000)), endTime: new Date(end.setTime(end.getTime()+3600*1000))}}, true)
+            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic],  timeStart: new Date(start.setTime(start.getTime()-8*3600*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
         }
     }
 
@@ -452,8 +458,8 @@ export class Dispatcher {
      * @param options 
      * @param live 
      */
-    dispatchQuery = async (options: StoreQueryOptions = {pageDirection: PageDirection.FORWARD, pageSize: 20}, live: boolean = false) => {
-        console.debug(options)
+    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic]}, live: boolean = false) => {
+        console.debug(this.decoder)
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
             options
@@ -504,9 +510,15 @@ export class Dispatcher {
      */
     checkSubscription = async () => {        
         if (this.subscription && !this.resubscribing) {
+            console.log("resubscribing")
             this.resubscribing = true
             try {
-                await this.subscription.ping();
+                console.log("pinging")
+                const result = await this.subscription.ping();
+                if (result.failures.length > 0) {
+                    throw new Error("ping failed");
+                    
+                }
             } catch (error) {
                 console.error(error)
                 this.filterConnected = false
@@ -523,18 +535,22 @@ export class Dispatcher {
                             } catch (unE) {
                                 console.error(unE)
                             } finally {
-                                this.subscription = undefined
+                                this.subscription = null
                             }
-                            this.subscription = await this.node.filter.createSubscription()
+                            console.debug("Trying to subscribe...")
+                            const subResult = await this.node.filter.subscribe([this.decoder], this.dispatch)
+                            if (subResult.error) {
+                                console.error(subResult.error)
+                                throw new Error(subResult.error);
+                                
+                            }
+                            this.subscription = subResult.subscription
                             console.debug("Created new subscription")
                         }
 
-                        console.debug("Trying to subscribe...")
-                        await this.subscription.subscribe([this.decoder], this.dispatch)
-                        console.debug("Resubscribed")
                         const end = new Date()
                         console.debug(`Query: ${start.toString()} -> ${end.toString()}`)
-                        await this.dispatchQuery({timeFilter: {startTime: new Date(start.setSeconds(start.getSeconds()-120)), endTime: end}}, true)
+                        await this.dispatchQuery({timeStart: new Date(start.setSeconds(start.getSeconds()-120)), timeEnd: end, includeData: true, contentTopics: [this.contentTopic], pubsubTopic: this.decoder.pubsubTopic, paginationForward: true}, true)
                         break;
                     } catch (e) {
                         console.debug("Failed to resubscribe: " + e)
@@ -557,7 +573,7 @@ export class Dispatcher {
     getConnectionInfo = async () => {
         return {
             connections: this.node.libp2p.getConnections(),
-            filterConnections: await this.node.filter.connectedPeers(),
+            //filterConnections: await this.node.filter.connectedPeers(),
             //lightpushConnections: await this.node.lightPush.connectedPeers(),
             subscription: this.filterConnected,
             subsciptionAttempts: this.resubscribeAttempts,

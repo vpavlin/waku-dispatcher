@@ -12,16 +12,34 @@ type StoreMsg = {
     direction: Direction
 }
 
+
+
 export class Store {
     db:IDBDatabase | undefined = undefined
+    ready: () => Promise<Boolean> | undefined
+    interval: NodeJS.Timeout | undefined
+    
     constructor(name: string) {
         const dbOpen = window.indexedDB.open(name, 1)
+        this.ready = async () => { return new Promise<Boolean>((resolve, reject) => {
+                this.interval = setInterval(() => {
+                    if (this.db) {
+                        resolve(true)
+                        clearInterval(this.interval)
+                        return
+                    }
+        
+                }, 100)
+            })
+        }
+        console.log(dbOpen)
         dbOpen.onerror = (event) => {
             console.error(event)
             throw new Error("Failed to open DB")
         }
         dbOpen.onsuccess = () => {
             this.db = dbOpen.result
+            console.log("success")
         }
         dbOpen.onupgradeneeded = (event:IDBVersionChangeEvent) => {
             // @ts-ignore
@@ -37,6 +55,8 @@ export class Store {
             objectStore.createIndex("direction", "direction", { unique: false})
             objectStore.createIndex("contentTopic", "dmsg.contentTopic", { unique: false})
 
+            console.log("finally")
+
         }
     }
 
@@ -50,7 +70,11 @@ export class Store {
     }
 
     getAll = async () => {
+        console.log("getAll")
         return new Promise<StoreMsg[]>((resolve, reject) => {
+            if (!this.db) {
+                reject("store failed")
+            }
             const transaction = this.db!.transaction(["message"]);
             const objectStore = transaction.objectStore("message");
             const request = objectStore.getAll()
