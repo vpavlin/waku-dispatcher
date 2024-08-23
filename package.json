@@ -9,8 +9,8 @@
   },
   "dependencies": {
     "@libp2p/crypto": "^4.0.3",
-    "@waku/message-encryption": "^0.0.27-fd60cc2.0",
-    "@waku/sdk": "^0.0.25-fd60cc2.0",
+    "@waku/message-encryption": "next",
+    "@waku/sdk": "0.0.27-39f8920.0",
     "ethers": "^6.12.0"
   },
   "scripts": {

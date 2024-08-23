@@ -8,6 +8,9 @@ import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet'
 
 
 
+
+
+
 enum Units {
   F = "F",
   C = "C",
@@ -49,10 +52,12 @@ function App() {
     if (dispatcher) return;
 
     (async () => {
-      const d = await getDispatcher(undefined, "/dispatcher-demo/0/example/json", "temperature", false)
+      
+      const d = await getDispatcher(undefined, "/dispatcher-demo/1/example/json", "temperature", false, [ "/dns4/waku.bloxy.one/tcp/8000/wss/p2p/16Uiu2HAmMJy3oXGzRjt2iKmYoCnaEkj55rE55YperMpemtGs9Da2"])
       if (d === null) return
       
       setDispatcher(d)
+      console.log("Dispatched ready")
     })()
   }, [])
 
@@ -63,6 +68,7 @@ function App() {
       console.log("received")
       setRecord((x) => [...x, msg])
     })
+    console.log("Executing local query")
     dispatcher.dispatchLocalQuery()
   },[dispatcher])
 
