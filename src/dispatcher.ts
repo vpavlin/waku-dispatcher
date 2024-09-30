@@ -3,6 +3,7 @@ import {
     bytesToUtf8,
     createDecoder,
     createEncoder,
+    IProtoMessage,
     utf8ToBytes,
     waitForRemotePeer,
 } from "@waku/sdk"
@@ -18,7 +19,7 @@ import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/
 import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/symmetric.js"
 import { Wallet, ethers, keccak256 } from "ethers"
 import { Direction, Store } from "./storage/store.js"
-
+import { messageHash } from "@waku/message-hash"
 
 export type IDispatchMessage = {
     type: MessageType
@@ -161,7 +162,7 @@ export class Dispatcher {
             console.debug(e.detail.toString())
             //await this.checkSubscription()
         })
-        this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 30000)
+        this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 10000)
 
 
         try {
@@ -350,7 +351,7 @@ export class Dispatcher {
      * @param encryptionKey 
      * @returns 
      */
-    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key) => {
+    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key): Promise<Boolean> => {
         const dmsg: IDispatchMessage = {
             type: typ,
             payload: payload,
@@ -390,17 +391,27 @@ export class Dispatcher {
             payloadArray = new Uint8Array(buffer.buffer)
         }
 
-        const msg: IMessage = {
-            payload: payloadArray
+        const msg: IProtoMessage = {
+            payload: payloadArray,
+            contentTopic: encoder.contentTopic,
+            ephemeral: encoder.ephemeral,
+            timestamp: undefined,
+            rateLimitProof: undefined,
+            meta: undefined,
+            version: undefined
+
         }
 
-        const res = await this.node.lightPush.send(encoder, msg)
+        const res = await this.node.lightPush.send(encoder, msg as IMessage)
+        console.log({msgHash: toHexString(messageHash(encoder.pubsubTopic, msg)), result: res})
+        if (res && res.successes && res.successes.length == 0 && this.node.lightPush.connectedPeers.length > 0) {
+            this.node.lightPush.renewPeer(this.node.lightPush.connectedPeers[0].id)
+        }
         /*if (res && res.errors && res.errors.length > 0) {
             msg.timestamp = new Date()
             this.emitCache.push({msg: msg, encoder: encoder})
         }*/
-
-        return res
+        return res && res.successes && res.successes.length > 0
     }
 
     /**
@@ -424,7 +435,7 @@ export class Dispatcher {
 
             return 1 
         })
-        console.log(messages)
+        //console.log(messages)
         for (let i = 0; i<messages.length; i++) {
             msg = messages[i]
 
@@ -469,6 +480,8 @@ export class Dispatcher {
                     })
             );
         }
+
+
     }
 
     dispatchRegularQuery = async () => {
@@ -476,7 +489,7 @@ export class Dispatcher {
             await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: this.lastSuccessfulQuery, timeEnd: new Date()})
             this.lastSuccessfulQuery = new Date()
         } catch (ex) {
-            console.error(ex)
+            console.error(ex)            
         }
     }
 
@@ -551,3 +564,9 @@ function reviver(key: any, value: any) {
 async function sleep(msec: number) {
 	return await new Promise((r) => setTimeout(r, msec))
 }
+
+function toHexString(byteArray: any) {
+    return Array.from(byteArray, function(byte: any) {
+      return ('0' + (byte & 0xFF).toString(16)).slice(-2);
+    }).join('')
+  }
