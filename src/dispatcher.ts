@@ -486,7 +486,8 @@ export class Dispatcher {
 
     dispatchRegularQuery = async () => {
         try {
-            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: this.lastSuccessfulQuery, timeEnd: new Date()})
+            let start = this.lastSuccessfulQuery
+            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-300*1000)), timeEnd: new Date()})
             this.lastSuccessfulQuery = new Date()
         } catch (ex) {
             console.error(ex)            
