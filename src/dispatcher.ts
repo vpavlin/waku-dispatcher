@@ -1,9 +1,10 @@
-import { LightNode, IDecodedMessage, QueryRequestParams, ISubscriptionSDK } from "@waku/interfaces"
+import { LightNode, IDecodedMessage, QueryRequestParams } from "@waku/interfaces"
 import {
     bytesToUtf8,
     createDecoder,
     createEncoder,
     IProtoMessage,
+    ISubscription,
     utf8ToBytes,
     waitForRemotePeer,
 } from "@waku/sdk"
@@ -80,7 +81,7 @@ export class Dispatcher {
     autoEncryptKeyId: number | undefined = undefined
     
     hearbeatInterval: NodeJS.Timeout | undefined
-    subscription: ISubscriptionSDK | null
+    subscription: ISubscription | null
     unsubscribe: undefined | Unsubscribe = undefined 
 
     lastSuccessfulQuery: Date = new Date()
@@ -404,9 +405,9 @@ export class Dispatcher {
 
         const res = await this.node.lightPush.send(encoder, msg as IMessage)
         console.log({msgHash: toHexString(messageHash(encoder.pubsubTopic, msg)), result: res})
-        if (res && res.successes && res.successes.length == 0 && this.node.lightPush.connectedPeers.length > 0) {
+        /*if (res && res.successes && res.successes.length == 0 && this.node.lightPush.connectedPeers.length > 0) {
             this.node.lightPush.renewPeer(this.node.lightPush.connectedPeers[0].id)
-        }
+        }*/
         /*if (res && res.errors && res.errors.length > 0) {
             msg.timestamp = new Date()
             this.emitCache.push({msg: msg, encoder: encoder})
