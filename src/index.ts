@@ -16,11 +16,13 @@ let initializing = false
  * @returns 
  */
 const getDispatcher = async (
-    node: LightNode | undefined,
+        node: LightNode | undefined,
         contentTopic: string,
         dbName: string,
         ephemeral: boolean,
-        bootstrapNodes?: string[]) => {
+        autostart?: boolean,
+        bootstrapNodes?: string[]
+    ) => {
 
     if (dispatcher || initializing) {
         return dispatcher
@@ -40,8 +42,11 @@ const getDispatcher = async (
     const store = new Store(`${dbName}-dispatcher`)
     await store.ready()
     dispatcher = new Dispatcher(node!, contentTopic, ephemeral, store)
-    await dispatcher.start()
-    console.debug("Dispatcher started")
+
+    if (autostart === undefined || autostart === true) {
+        await dispatcher.start()
+        console.debug("Dispatcher started")
+    }
 
     initializing = false
        

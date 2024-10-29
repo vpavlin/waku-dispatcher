@@ -6,7 +6,7 @@ export enum Direction {
     Out,
 }
 
-type StoreMsg = {
+export type StoreMsg = {
     dmsg: IDecodedMessage
     hash: string
     direction: Direction
@@ -18,10 +18,12 @@ export class Store {
     db:IDBDatabase | undefined = undefined
     ready: () => Promise<Boolean> | undefined
     interval: NodeJS.Timeout | undefined
+    reject: undefined | ((reason:any) => void)  = undefined
     
     constructor(name: string) {
         const dbOpen = window.indexedDB.open(name, 1)
         this.ready = async () => { return new Promise<Boolean>((resolve, reject) => {
+            this.reject = reject
                 this.interval = setInterval(() => {
                     if (this.db) {
                         resolve(true)
@@ -34,6 +36,7 @@ export class Store {
         }
         console.log(dbOpen)
         dbOpen.onerror = (event) => {
+            this.reject && this.reject(event)
             console.error(event)
             throw new Error("Failed to open DB")
         }
@@ -47,7 +50,7 @@ export class Store {
 
             db.onerror = (e:any) => {
                 console.error(e)
-                throw new Error("Failed to upgrade the DB")
+                this.reject && this.reject(event)               
             }
 
             const objectStore = db.createObjectStore("message", { keyPath: "hash" });
@@ -65,7 +68,10 @@ export class Store {
         const objectStore = transaction.objectStore("message");
         const request = objectStore.add(msg)
         request.onerror = (evt) => {
-            console.error(evt)
+            const e:IDBRequest = evt.target  as IDBRequest
+            if (!e.error?.message.includes("Key already exists")) {
+                console.error(evt)
+            }
         }
     }
 

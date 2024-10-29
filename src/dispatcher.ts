@@ -19,13 +19,13 @@ import {
 import { encrypt, decrypt } from "../node_modules/@waku/message-encryption/dist/crypto/ecies.js"
 import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/message-encryption/dist/symmetric.js"
 import { Wallet, ethers, keccak256 } from "ethers"
-import { Direction, Store } from "./storage/store.js"
-import { messageHash } from "@waku/message-hash"
+import { Direction, Store, StoreMsg } from "./storage/store.js"
+//import { messageHash } from "@waku/message-hash"
 
 export type IDispatchMessage = {
     type: MessageType
     payload: any
-    timestamp: string | undefined
+    timestamp: number | undefined
     signature: string | undefined
     signer: string | undefined
 }
@@ -34,13 +34,15 @@ type DispachInfo = {
     callback: DispatchCallback
     verifySender: boolean
     acceptOnlyEncrypted: boolean
+    contentTopic: string
+    storeLocally: boolean
 }
 
 export type Signer = string | undefined
 
 export type DispatchMetadata = {
     encrypted: boolean
-    timestamp: string | undefined
+    timestamp: number | undefined
     fromStore: boolean
     contentTopic: string
     ephemeral: boolean | undefined
@@ -132,18 +134,20 @@ export class Dispatcher {
      * @param callback 
      * @param verifySender 
      * @param acceptOnlyEcrypted 
+     * @param contentTopic
      * @returns 
      */
-    on = (typ: MessageType, callback: DispatchCallback, verifySender?: boolean, acceptOnlyEcrypted?: boolean) => {
+    on = (typ: MessageType, callback: DispatchCallback, verifySender?: boolean, acceptOnlyEcrypted?: boolean, contentTopic?: string, storeLocally?: boolean) => {
         if (!this.mapping.has(typ)) {
             this.mapping.set(typ, [])
         }
         const dispatchInfos = this.mapping.get(typ)
-        const newDispatchInfo = { callback: callback, verifySender: !!verifySender, acceptOnlyEncrypted: !!acceptOnlyEcrypted }
+        const newDispatchInfo = { callback: callback, verifySender: !!verifySender, acceptOnlyEncrypted: !!acceptOnlyEcrypted, contentTopic: contentTopic ? contentTopic : this.contentTopic, storeLocally: storeLocally === undefined ? true : storeLocally}
         if (dispatchInfos?.find((di) => di.callback.toString() == newDispatchInfo.callback.toString())) {
             console.warn("Skipping the callback setup - already exists")
             return
         }
+
         dispatchInfos?.push(newDispatchInfo)
         this.mapping.set(typ, dispatchInfos!)
     }
@@ -165,10 +169,18 @@ export class Dispatcher {
         })
         this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 10000)
 
+        const decoders = [this.decoder]
+
+        for (const di of this.mapping.values()) {
+            for (const i of di) {
+                if (i.contentTopic != this.contentTopic) {
+                    decoders.push(createDecoder(i.contentTopic))
+                }
+            }
+        }
 
         try {
-        
-            const subResult = await this.node.filter.subscribe(this.decoder, this.dispatch)
+            const subResult = await this.node.filter.subscribe(decoders, this.dispatch)
             if (subResult.error) {
                 throw new Error(subResult.error);
             }
@@ -218,16 +230,16 @@ export class Dispatcher {
             console.debug("Message already delivered")
             return true
         }
-        if (this.msgHashes.length > 100) {
+        if (this.msgHashes.length > 2000) {
             console.debug("Dropping old messages from hash cache")
-            this.msgHashes.slice(hash.length - 100, hash.length)
+            this.msgHashes.slice(hash.length - 500, hash.length)
         }
         this.msgHashes.push(hash)
         return false
     }
 
-    private decrypt = async (msg: IDecodedMessage):Promise<[Uint8Array, boolean]> => {
-        let msgPayload = msg.payload
+    private decrypt = async (payload: Uint8Array):Promise<[Uint8Array, boolean]> => {
+        let msgPayload = payload
         let encrypted = false
         if (this.decryptionKeys.length > 0) {
             for (const key of this.decryptionKeys) {
@@ -266,6 +278,27 @@ export class Dispatcher {
         return true
     }
 
+
+    ensureUint8Array = (payload: Uint8Array):Uint8Array => {
+        let wakuPayload = new Uint8Array()
+        
+        if (payload instanceof Uint8Array) {
+            wakuPayload = payload
+        } else {
+            wakuPayload = new Uint8Array(Object.values(payload));
+        }
+
+        return wakuPayload
+    }
+
+    decryptMessage = async (payload: Uint8Array):Promise<[IDispatchMessage, boolean]> => {
+        const wakuPayload = this.ensureUint8Array(payload)
+        const [msgPayload, encrypted] = await this.decrypt(wakuPayload)
+
+        const dmsg: IDispatchMessage = JSON.parse(bytesToUtf8(msgPayload), reviver)
+        return [dmsg, encrypted]
+    }
+
     /**
      * Performs various processing and validation steps on the message (decryption, signature verification, deduplication...) and executes all registered callbacks for the message type
      * @param msg 
@@ -273,16 +306,16 @@ export class Dispatcher {
      * @returns 
      */
     dispatch = async (msg: IDecodedMessage, fromStorage: boolean = false) => {
-        const [msgPayload, encrypted] = await this.decrypt(msg)
+        const wakuPayload = this.ensureUint8Array(msg.payload) 
 
-        const input = new Uint8Array([...ethers.toUtf8Bytes(msg.contentTopic), ...msg.payload, ...ethers.toUtf8Bytes(msg.timestamp!.toString()), ...ethers.toUtf8Bytes(msg.pubsubTopic)])
+        const input = new Uint8Array([...ethers.toUtf8Bytes(msg.contentTopic), ...wakuPayload, ...ethers.toUtf8Bytes(msg.timestamp!.toString()), ...ethers.toUtf8Bytes(msg.pubsubTopic)])
         const hash = keccak256(input)
         if (this.checkDuplicate(hash)) return
 
         try {
-            const dmsg: IDispatchMessage = JSON.parse(bytesToUtf8(msgPayload), reviver)
+            const [dmsg, encrypted] = await this.decryptMessage(wakuPayload)
             if (!dmsg.timestamp)
-                dmsg.timestamp = msg.timestamp?.toString()
+                dmsg.timestamp = new Date(msg.timestamp!).getTime()
 
             if (!this.mapping.has(dmsg.type)) {
                 console.error("Unknown type " + dmsg.type)
@@ -302,20 +335,28 @@ export class Dispatcher {
                     continue
                 }
 
+                if (dispatchInfo.contentTopic != msg.contentTopic) {
+                    console.log(`Content topic mismatch ${dispatchInfo.contentTopic} != ${msg.contentTopic}`)
+                    continue
+                }
+
                 let payload = dmsg.payload
 
                 if (dispatchInfo.verifySender) {
-                    if (!this.verifySender(dmsg)) continue
+                    if (!this.verifySender(dmsg)) {
+                        console.debug("failed to verify sender")
+                        continue
+                    }
                 }
 
-                this.lastDeliveredTimestamp = msg.timestamp?.getTime()|| Date.now()
+                this.lastDeliveredTimestamp = new Date(msg.timestamp!).getTime()|| Date.now()
 
-                if (!msg.ephemeral && !fromStorage) {
+                if (!msg.ephemeral && !fromStorage && dispatchInfo.storeLocally) {
                     this.store.set({direction: Direction.In, dmsg: {
                         contentTopic: msg.contentTopic,
                         ephemeral: msg.ephemeral,
                         meta: msg.meta,
-                        payload: msg.payload,
+                        payload: wakuPayload,
                         pubsubTopic: msg.pubsubTopic,
                         rateLimitProof: msg.rateLimitProof,
                         timestamp: msg.timestamp,
@@ -352,11 +393,11 @@ export class Dispatcher {
      * @param encryptionKey 
      * @returns 
      */
-    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key): Promise<Boolean> => {
+    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key | boolean): Promise<Boolean> => {
         const dmsg: IDispatchMessage = {
             type: typ,
             payload: payload,
-            timestamp: (new Date()).getTime().toString(),
+            timestamp: (new Date()).getTime(),
             signature: undefined,
             signer: undefined
         }
@@ -366,17 +407,17 @@ export class Dispatcher {
             dmsg.signature = wallet.signMessageSync(JSON.stringify(dmsg))
         }
 
-        console.debug(dmsg)
+        //console.debug(dmsg)
         let payloadArray = utf8ToBytes(JSON.stringify(dmsg, replacer))
         let keyType = KeyType.Asymetric
         let key: Uint8Array
 
-        if (!encryptionKey && this.autoEncrypt && this.autoEncryptKeyId !== undefined) {
+        if ((encryptionKey === undefined || encryptionKey !== false) && this.autoEncrypt && this.autoEncryptKeyId !== undefined) {
             encryptionKey = this.decryptionKeys[this.autoEncryptKeyId]
         }
 
         if (encryptionKey) {
-            console.debug("Will encrypt")
+            //console.debug("Will encrypt")
             if (typeof encryptionKey == "object" && (encryptionKey as Key).key !== undefined) {
                  keyType = (encryptionKey as Key).type
                  key = (encryptionKey as Key).key
@@ -404,7 +445,7 @@ export class Dispatcher {
         }
 
         const res = await this.node.lightPush.send(encoder, msg as IMessage)
-        console.log({msgHash: toHexString(messageHash(encoder.pubsubTopic, msg)), result: res})
+        //console.log({msgHash: toHexString(messageHash(encoder.pubsubTopic, msg)), result: res})
         /*if (res && res.successes && res.successes.length == 0 && this.node.lightPush.connectedPeers.length > 0) {
             this.node.lightPush.renewPeer(this.node.lightPush.connectedPeers[0].id)
         }*/
@@ -415,13 +456,8 @@ export class Dispatcher {
         return res && res.successes && res.successes.length > 0
     }
 
-    /**
-     * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
-     */
-    dispatchLocalQuery = async () => {
+    getLocalMessages = async () => {
         let messages = await this.store.getAll()
-        let msg
-        let start = new Date(0)
 
         //console.log(messages)
         messages = messages.sort((a, b) => {
@@ -431,33 +467,61 @@ export class Dispatcher {
             if (!b.dmsg.timestamp)
                 return -1
 
-            if (a.dmsg.timestamp < b.dmsg.timestamp)
+            const first = new Date(a.dmsg.timestamp).getTime()
+            const second = new Date(b.dmsg.timestamp).getTime()
+            if (first < second)
                 return -1
 
             return 1 
         })
+
+        return messages
+    }
+
+    importLocalMessage = async (messages: StoreMsg[]) => {
+        for (const msg of messages) {
+            try {
+            this.store.set(msg)
+            } catch (e) {
+                console.error(e)
+            }
+        }
+    }
+
+    /**
+     * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
+     */
+    dispatchLocalQuery = async () => {
+        let msg
+        let start = new Date(0)
+        let messages = await this.getLocalMessages()
         //console.log(messages)
         for (let i = 0; i<messages.length; i++) {
             msg = messages[i]
 
+            //TODO: I don't think this is needed, but need to verify
             //Ignore messages from different content topics - FIXME: Add index and do this in the DB query!
-            if (msg.dmsg.contentTopic != this.decoder.contentTopic) {
+            /*if (msg.dmsg.contentTopic != this.decoder.contentTopic) {
                 console.debug(`Ignoring msg - content topic mismatch: ${msg.dmsg.contentTopic} != ${this.decoder.contentTopic}`)
                 continue
-            }
+            }*/
             await this.dispatch(msg.dmsg, true)
             if (msg.dmsg.timestamp && msg.dmsg.timestamp > start)
                 start = msg.dmsg.timestamp
         }
 
-        if (start.getTime() > 0) {
-            while(!this.filterConnected) {console.debug("sleeping"); await sleep(1_000)}
-            let end = new Date() 
-            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-360*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
-        } else {
-            let start = new Date()
-            let end = new Date()
-            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic],  timeStart: new Date(start.setTime(start.getTime()-8*3600*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
+        try {
+            if (start.getTime() > 0) {
+                //while(!this.filterConnected) {console.debug("sleeping"); await sleep(1_000)}
+                let end = new Date() 
+                await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-360*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
+            } else {
+                let start = new Date()
+                let end = new Date()
+                await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic],  timeStart: new Date(start.setTime(start.getTime()-8*3600*1000)), timeEnd: new Date(end.setTime(end.getTime()+3600*1000))}, true)
+            }
+        } catch (e) {
+            console.error(e)
         }
     }
 
@@ -466,7 +530,7 @@ export class Dispatcher {
      * @param options 
      * @param live 
      */
-    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic]}, live: boolean = false) => {
+    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic]}, live: boolean = false) => {
         console.log(options)
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
@@ -488,7 +552,7 @@ export class Dispatcher {
     dispatchRegularQuery = async () => {
         try {
             let start = this.lastSuccessfulQuery
-            await this.dispatchQuery({paginationForward: true, paginationLimit: 20, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-300*1000)), timeEnd: new Date()})
+            await this.dispatchQuery({paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-300*1000)), timeEnd: new Date()})
             this.lastSuccessfulQuery = new Date()
         } catch (ex) {
             console.error(ex)            
@@ -567,8 +631,8 @@ async function sleep(msec: number) {
 	return await new Promise((r) => setTimeout(r, msec))
 }
 
-function toHexString(byteArray: any) {
+/*function toHexString(byteArray: any) {
     return Array.from(byteArray, function(byte: any) {
       return ('0' + (byte & 0xFF).toString(16)).slice(-2);
     }).join('')
-  }
+  }*/
