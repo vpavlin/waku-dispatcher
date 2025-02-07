@@ -5,6 +5,7 @@ import {
     createEncoder,
     IProtoMessage,
     ISubscription,
+    SDKProtocolResult,
     utf8ToBytes,
     waitForRemotePeer,
 } from "@waku/sdk"
@@ -393,7 +394,7 @@ export class Dispatcher {
      * @param encryptionKey 
      * @returns 
      */
-    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key | boolean): Promise<Boolean> => {
+    emitTo = async (encoder: IEncoder, typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key | boolean, returnFull?: boolean): Promise<Boolean | SDKProtocolResult> => {
         const dmsg: IDispatchMessage = {
             type: typ,
             payload: payload,
@@ -453,6 +454,9 @@ export class Dispatcher {
             msg.timestamp = new Date()
             this.emitCache.push({msg: msg, encoder: encoder})
         }*/
+       if (returnFull) {
+        return res
+       }
         return res && res.successes && res.successes.length > 0
     }
 
@@ -530,7 +534,7 @@ export class Dispatcher {
      * @param options 
      * @param live 
      */
-    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic]}, live: boolean = false) => {
+    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(new Date().getTime() - (24 * 60 * 60 * 1000)), timeEnd: new Date()}, live: boolean = false) => {
         console.log(options)
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
