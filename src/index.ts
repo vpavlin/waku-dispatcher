@@ -23,11 +23,14 @@ const getDispatcher = async (
         autostart?: boolean,
         bootstrapNodes?: string[]
     ) => {
+    console.debug("Setting up dispatcher", initializing)
 
     if (dispatcher || initializing) {
         return dispatcher
     }
     initializing = true
+
+    console.debug("Set 'initializing' to true")
 
     if (!node) {
         console.log("Setting up a node!")
@@ -37,10 +40,14 @@ const getDispatcher = async (
         })
         node.start()
         await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter, Protocols.Store])
+    } else {
+        console.debug("Got node from caller")
     }
     console.info("Creating dispatcher")
     const store = new Store(`${dbName}-dispatcher`)
+    console.debug("Store created")
     await store.ready()
+    console.log("Store ready")
     dispatcher = new Dispatcher(node!, contentTopic, ephemeral, store)
 
     if (autostart === undefined || autostart === true) {

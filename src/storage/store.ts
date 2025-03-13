@@ -21,7 +21,15 @@ export class Store {
     reject: undefined | ((reason:any) => void)  = undefined
     
     constructor(name: string) {
-        const dbOpen = window.indexedDB.open(name, 1)
+        console.log("Creating store", name)
+        let dbOpen
+        try {
+            dbOpen = indexedDB.open(name, 1)
+        } catch (e) {
+            console.error(e)
+            throw new Error("Failed to open DB")
+        }
+        console.log("DB open")
         this.ready = async () => { return new Promise<Boolean>((resolve, reject) => {
             this.reject = reject
                 this.interval = setInterval(() => {

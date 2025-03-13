@@ -72,9 +72,9 @@ export class Dispatcher {
     mapping: Map<MessageType, DispachInfo[]>
     node: LightNode
     contentTopic: string
-    decoder: IDecoder<IDecodedMessage>
-    encoder: IEncoder
-    encoderEphemeral: IEncoder
+    decoder: IDecoder<IDecodedMessage> | undefined
+    encoder: IEncoder | undefined
+    encoderEphemeral: IEncoder | undefined
     ephemeralDefault: boolean
 
     running: boolean
@@ -111,13 +111,7 @@ export class Dispatcher {
         this.node = node
         this.contentTopic = contentTopic
 
-     
-        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false })
-
-
         this.ephemeralDefault = ephemeral
-        this.decoder = createDecoder(contentTopic)
         this.running = false
         this.decryptionKeys = []
 
@@ -170,11 +164,29 @@ export class Dispatcher {
         })
         this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 10000)
 
+        if (this.contentTopic.length > 0) {
+            this.initContentTopic(this.contentTopic)
+        }
+
+        //this.reemitInterval = setInterval(() => this.emitFromCache(), 10000)
+    }
+
+    /**
+     * This method is called automatically from start if contentTOpic is set initially, or it can be called
+     * later in cases where the contentTopic is resolved later
+     * @param contentTopic 
+     */
+    initContentTopic = async (contentTopic:string) => {
+        this.contentTopic = contentTopic
+        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
+        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false })
+        this.decoder = createDecoder(contentTopic)
+
         const decoders = [this.decoder]
 
         for (const di of this.mapping.values()) {
             for (const i of di) {
-                if (i.contentTopic != this.contentTopic) {
+                if (i.contentTopic != contentTopic) {
                     decoders.push(createDecoder(i.contentTopic))
                 }
             }
@@ -191,7 +203,6 @@ export class Dispatcher {
         } catch (e){
             console.error(e)
         }
-        //this.reemitInterval = setInterval(() => this.emitFromCache(), 10000)
     }
 
     stop = async () => {
@@ -203,6 +214,7 @@ export class Dispatcher {
         this.subscription = null
         this.msgHashes = []
         this.mapping.clear()
+        this.clearDuplicateCache()
     }
 
     /**
@@ -381,6 +393,9 @@ export class Dispatcher {
      * @returns 
      */
     emit = async (typ: MessageType, payload: any, wallet?: Wallet, encryptionKey?: Uint8Array | Key, ephemeral: boolean = this.ephemeralDefault) => {
+        if (!this.encoder || !this.encoderEphemeral) {
+            throw new Error("ContentTopic not initialized")
+        }
         const encoder = ephemeral ? this.encoderEphemeral : this.encoder
         return this.emitTo(encoder, typ, payload, wallet, encryptionKey)
     }
@@ -460,7 +475,11 @@ export class Dispatcher {
         return res && res.successes && res.successes.length > 0
     }
 
-    getLocalMessages = async () => {
+    /**
+     * Queries local message store and returns all messages ordered by the timestamp
+     * @returns List of locally stored messages
+     */
+    getLocalMessages = async ():Promise<StoreMsg[]> => {
         let messages = await this.store.getAll()
 
         //console.log(messages)
@@ -482,6 +501,10 @@ export class Dispatcher {
         return messages
     }
 
+    /**
+     * Imports a list of messages into a local storage - e.g. when pulled from persistent storage (e.g. Codex)
+     * @param messages List of messages in local storage format to be imported
+     */
     importLocalMessage = async (messages: StoreMsg[]) => {
         for (const msg of messages) {
             try {
@@ -496,6 +519,11 @@ export class Dispatcher {
      * Queries the IndexDB for existing messages and dispatches them as if they were just delivered. It also queries Waku Store protocol for new messages (since the timestamp of last message)
      */
     dispatchLocalQuery = async () => {
+        if (!this.decoder) {
+            throw new Error("ContentTopic not initialized")
+        }
+
+        console.log(this.contentTopic, this.decoder.contentTopic)
         let msg
         let start = new Date(0)
         let messages = await this.getLocalMessages()
@@ -534,8 +562,12 @@ export class Dispatcher {
      * @param options 
      * @param live 
      */
-    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(new Date().getTime() - (24 * 60 * 60 * 1000)), timeEnd: new Date()}, live: boolean = false) => {
+    dispatchQuery = async (options: QueryRequestParams = {paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder?.pubsubTopic || "", contentTopics: [this.contentTopic], timeStart: new Date(new Date().getTime() - (24 * 60 * 60 * 1000)), timeEnd: new Date()}, live: boolean = false) => {
+        if (!this.decoder) {
+            throw new Error("ContentTopic not initialized")
+        }
         console.log(options)
+
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
             options
@@ -545,15 +577,24 @@ export class Dispatcher {
                     .map(async (p) => {
                         const msg = await p;
                         if (msg)
-                            await this.dispatch(msg, !live)
+                            console.log(msg)
+                            await this.dispatch(msg!, !live)
                     })
             );
         }
 
+        console.log("Query done")
+
 
     }
 
+    /**
+     * Query last 5 minutes of messages from Store protocol and process them
+     */
     dispatchRegularQuery = async () => {
+        if (!this.decoder) {
+            throw new Error("ContentTopic not initialized")
+        }
         try {
             let start = this.lastSuccessfulQuery
             await this.dispatchQuery({paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-300*1000)), timeEnd: new Date()})
