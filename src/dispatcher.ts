@@ -7,7 +7,6 @@ import {
     ISubscription,
     SDKProtocolResult,
     utf8ToBytes,
-    waitForRemotePeer,
 } from "@waku/sdk"
 
 import {
@@ -22,6 +21,7 @@ import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/messag
 import { Wallet, ethers, keccak256 } from "ethers"
 import { Direction, Store, StoreMsg } from "./storage/store.js"
 //import { messageHash } from "@waku/message-hash"
+import { contentTopicToShardIndex, pubsubTopicsToShardInfo } from "@waku/utils"
 
 export type IDispatchMessage = {
     type: MessageType
@@ -155,7 +155,7 @@ export class Dispatcher {
         if (this.running) return
         this.running = true
         //await this.node.start()
-        await waitForRemotePeer(this.node, [Protocols.LightPush, Protocols.Filter, Protocols.Store])
+        await this.node.waitForPeers([Protocols.LightPush, Protocols.Filter, Protocols.Store])
         
         this.node.libp2p.addEventListener("peer:disconnect", async (e:any) => {
             console.debug("Peer disconnected, check subscription!")
@@ -177,17 +177,23 @@ export class Dispatcher {
      * @param contentTopic 
      */
     initContentTopic = async (contentTopic:string) => {
+        const pubsubTopics = this.node.connectionManager.pubsubTopics
+        const shardInfo = pubsubTopicsToShardInfo(pubsubTopics)
+        const shardIndex = contentTopicToShardIndex(contentTopic, shardInfo.shards.length)
+
+        console.log(shardInfo)
+
         this.contentTopic = contentTopic
         this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false })
-        this.decoder = createDecoder(contentTopic)
+        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false, pubsubTopicShardInfo: {clusterId: shardInfo.clusterId, shard: shardIndex} })
+        this.decoder = createDecoder(contentTopic, {clusterId: shardInfo.clusterId, shard: shardIndex})
 
         const decoders = [this.decoder]
 
         for (const di of this.mapping.values()) {
             for (const i of di) {
                 if (i.contentTopic != contentTopic) {
-                    decoders.push(createDecoder(i.contentTopic))
+                    decoders.push(createDecoder(i.contentTopic, {clusterId: shardInfo.clusterId, shard: contentTopicToShardIndex(i.contentTopic, shardInfo.shards.length)}))
                 }
             }
         }
