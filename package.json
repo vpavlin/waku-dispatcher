@@ -1,6 +1,6 @@
 {
   "name": "waku-dispatcher",
-  "version": "0.0.20-dev",
+  "version": "0.0.21-dev",
   "types": "./dist/index.d.ts",
   "module": "./dist/index.js",
   "type": "module",
