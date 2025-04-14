@@ -181,8 +181,6 @@ export class Dispatcher {
         const shardInfo = pubsubTopicsToShardInfo(pubsubTopics)
         const shardIndex = contentTopicToShardIndex(contentTopic, shardInfo.shards.length)
 
-        console.log(shardInfo)
-
         this.contentTopic = contentTopic
         this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
         this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false, pubsubTopicShardInfo: {clusterId: shardInfo.clusterId, shard: shardIndex} })
@@ -487,7 +485,7 @@ export class Dispatcher {
      * @returns List of locally stored messages
      */
     getLocalMessages = async ():Promise<StoreMsg[]> => {
-        let messages = await this.store.getAll()
+        let messages = await this.store.getByContentTopic(this.contentTopic)
 
         //console.log(messages)
         messages = messages.sort((a, b) => {
