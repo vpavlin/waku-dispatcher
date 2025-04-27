@@ -65,7 +65,7 @@ export type Key = {
 }
 
 type MessageType = string
-type DispatchCallback = (payload: any, signer: Signer, meta: DispatchMetadata) => void
+type DispatchCallback = (payload: any, signer: Signer, meta: DispatchMetadata) => Promise<void>
 
 
 export class Dispatcher {
@@ -368,7 +368,7 @@ export class Dispatcher {
 
                 this.lastDeliveredTimestamp = new Date(msg.timestamp!).getTime()|| Date.now()
 
-                dispatchInfo.callback(payload, dmsg.signer, { encrypted: encrypted, fromStore: fromStorage, timestamp: dmsg.timestamp, ephemeral: msg.ephemeral, contentTopic: msg.contentTopic })
+                await dispatchInfo.callback(payload, dmsg.signer, { encrypted: encrypted, fromStore: fromStorage, timestamp: dmsg.timestamp, ephemeral: msg.ephemeral, contentTopic: msg.contentTopic })
 
                 if (!msg.ephemeral && !fromStorage && dispatchInfo.storeLocally) {
                     this.store.set({direction: Direction.In, dmsg: {

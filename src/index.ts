@@ -72,4 +72,4 @@ export const destroyDispatcher = async () => {
 
 export default getDispatcher;
 export * from "./dispatcher.js"
-export {Store} from "./storage/store.js";
+export {Store, StoreMsg} from "./storage/store.js";
