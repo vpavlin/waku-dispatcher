@@ -53,7 +53,7 @@ function App() {
 
     (async () => {
       
-      const d = await getDispatcher(undefined, "/dispatcher-demo/1/example/json", "temperature", false, true, [ "/dns4/waku.bloxy.one/tcp/8000/wss/p2p/16Uiu2HAmMJy3oXGzRjt2iKmYoCnaEkj55rE55YperMpemtGs9Da2"])
+      const d = await getDispatcher(undefined, "/dispatcher-demo/1/example/json", "temperature", false, true)
       if (d === null) return
       
       setDispatcher(d)
@@ -64,7 +64,7 @@ function App() {
   useEffect(() => {
     if (!dispatcher) return
 
-    dispatcher.on("hello", (msg:TemperatureMsg, signer: Signer, meta: DispatchMetadata) => {
+    dispatcher.on("hello", async (msg:TemperatureMsg, signer: Signer, meta: DispatchMetadata) => {
       console.log("received")
       setRecord((x) => [...x, msg])
     })

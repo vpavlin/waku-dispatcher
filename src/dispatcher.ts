@@ -4,7 +4,6 @@ import {
     createDecoder,
     createEncoder,
     IProtoMessage,
-    ISubscription,
     SDKProtocolResult,
     utf8ToBytes,
 } from "@waku/sdk"
@@ -21,7 +20,6 @@ import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/messag
 import { Wallet, ethers, keccak256 } from "ethers"
 import { Direction, Store, StoreMsg } from "./storage/store.js"
 //import { messageHash } from "@waku/message-hash"
-import { contentTopicToShardIndex, pubsubTopicsToShardInfo } from "@waku/utils"
 
 export type IDispatchMessage = {
     type: MessageType
@@ -84,7 +82,6 @@ export class Dispatcher {
     autoEncryptKeyId: number | undefined = undefined
     
     hearbeatInterval: NodeJS.Timeout | undefined
-    subscription: ISubscription | null
     unsubscribe: undefined | Unsubscribe = undefined 
 
     lastSuccessfulQuery: Date = new Date()
@@ -115,7 +112,6 @@ export class Dispatcher {
         this.running = false
         this.decryptionKeys = []
 
-        this.subscription = null
         this.hearbeatInterval = undefined
 
         this.store = store
@@ -177,31 +173,26 @@ export class Dispatcher {
      * @param contentTopic 
      */
     initContentTopic = async (contentTopic:string) => {
-        const pubsubTopics = this.node.connectionManager.pubsubTopics
-        const shardInfo = pubsubTopicsToShardInfo(pubsubTopics)
-        const shardIndex = contentTopicToShardIndex(contentTopic, shardInfo.shards.length)
-
         this.contentTopic = contentTopic
         this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false, pubsubTopicShardInfo: {clusterId: shardInfo.clusterId, shard: shardIndex} })
-        this.decoder = createDecoder(contentTopic, {clusterId: shardInfo.clusterId, shard: shardIndex})
+        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false,  })
+        this.decoder = createDecoder(contentTopic)
 
         const decoders = [this.decoder]
 
         for (const di of this.mapping.values()) {
             for (const i of di) {
                 if (i.contentTopic != contentTopic) {
-                    decoders.push(createDecoder(i.contentTopic, {clusterId: shardInfo.clusterId, shard: contentTopicToShardIndex(i.contentTopic, shardInfo.shards.length)}))
+                    decoders.push(createDecoder(i.contentTopic))
                 }
             }
         }
 
         try {
             const subResult = await this.node.filter.subscribe(decoders, this.dispatch)
-            if (subResult.error) {
-                throw new Error(subResult.error);
+            if (!subResult) {
+                throw new Error("Failed to subscribe");
             }
-            this.subscription = subResult.subscription
             
             this.filterConnected = true
         } catch (e){
@@ -215,7 +206,6 @@ export class Dispatcher {
         //clearInterval(this.reemitInterval)
         //await this.subscription?.unsubscribeAll()
         if (this.unsubscribe) await this.unsubscribe()
-        this.subscription = null
         this.msgHashes = []
         this.mapping.clear()
         this.clearDuplicateCache()
@@ -379,6 +369,7 @@ export class Dispatcher {
                         pubsubTopic: msg.pubsubTopic,
                         rateLimitProof: msg.rateLimitProof,
                         timestamp: msg.timestamp,
+                        version: msg.version,
                     }, hash: hash})
                 }
                 
