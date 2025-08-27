@@ -1,8 +1,6 @@
 import { LightNode, IDecodedMessage, QueryRequestParams } from "@waku/interfaces"
 import {
     bytesToUtf8,
-    createDecoder,
-    createEncoder,
     IProtoMessage,
     SDKProtocolResult,
     utf8ToBytes,
@@ -20,6 +18,80 @@ import { decryptSymmetric, encryptSymmetric } from "../node_modules/@waku/messag
 import { Wallet, ethers, keccak256 } from "ethers"
 import { Direction, Store, StoreMsg } from "./storage/store.js"
 //import { messageHash } from "@waku/message-hash"
+
+// Logging levels
+enum LogLevel {
+    ERROR = 0,
+    WARN = 1,
+    INFO = 2,
+    DEBUG = 3
+}
+
+// Helper function to get log level from environment
+function getLogLevelFromEnv(): LogLevel | null {
+    // Check if we're in a browser environment
+    if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+        try {
+            const level = window.localStorage.getItem('dispatcher:log_level');
+            if (level !== null) {
+                const numericLevel = parseInt(level, 10);
+                if (numericLevel >= 0 && numericLevel <= 3) {
+                    return numericLevel as LogLevel;
+                }
+            }
+        } catch (e) {
+            // localStorage might be disabled or unavailable
+            console.warn('Could not read LOG_LEVEL from localStorage:', e);
+        }
+    }
+    
+    // Check if we're in a Node.js environment
+    if (typeof process !== 'undefined' && process.env) {
+        const level = process.env.DISPATCHER_LOG_LEVEL;
+        console.log(level)
+        if (level !== undefined) {
+            const numericLevel = parseInt(level, 10);
+            if (numericLevel >= 0 && numericLevel <= 3) {
+                return numericLevel as LogLevel;
+            }
+        }
+    }
+    
+    return null;
+}
+
+// Logger class for configurable logging
+class Logger {
+    private level: LogLevel = getLogLevelFromEnv() || LogLevel.INFO;
+
+    setLevel(level: LogLevel): void {
+        this.level = level;
+    }
+
+    error(message: any): void {
+        if (this.level >= LogLevel.ERROR) {
+            console.error(`[ERROR]`, message);
+        }
+    }
+
+    warn(message: any): void {
+        if (this.level >= LogLevel.WARN) {
+            console.warn(`[WARN]`, message);
+        }
+    }
+
+    info(message: any): void {
+        if (this.level >= LogLevel.INFO) {
+            console.info(`[INFO]`, message);
+        }
+    }
+
+    debug(message: any): void {
+        if (this.level >= LogLevel.DEBUG) {
+            console.debug(`[DEBUG]`, message);
+        }
+    }
+}
 
 export type IDispatchMessage = {
     type: MessageType
@@ -65,7 +137,6 @@ export type Key = {
 type MessageType = string
 type DispatchCallback = (payload: any, signer: Signer, meta: DispatchMetadata) => Promise<void>
 
-
 export class Dispatcher {
     mapping: Map<MessageType, DispachInfo[]>
     node: LightNode
@@ -82,12 +153,12 @@ export class Dispatcher {
     autoEncryptKeyId: number | undefined = undefined
     
     hearbeatInterval: NodeJS.Timeout | undefined
-    unsubscribe: undefined | Unsubscribe = undefined 
-
+    unsubscribe: undefined | Unsubscribe = undefined
+    
     lastSuccessfulQuery: Date = new Date()
     
     filterConnected:boolean = false
-    lastDeliveredTimestamp:number | undefined= undefined 
+    lastDeliveredTimestamp:number | undefined= undefined
 
     msgHashes: string[] = []
     emitCache: EmitCache[] = []
@@ -95,13 +166,14 @@ export class Dispatcher {
     reemitInterval: NodeJS.Timer | undefined = undefined
 
     store: Store
+    private logger: Logger = new Logger();
 
     /**
-     * Dispatcher is a wrapper around js-waku SDK 
-     * @param node 
-     * @param contentTopic 
-     * @param ephemeral 
-     * @param store 
+     * Dispatcher is a wrapper around js-waku SDK
+     * @param node
+     * @param contentTopic
+     * @param ephemeral
+     * @param store
      */
     constructor(node: LightNode, contentTopic: string, ephemeral: boolean, store: Store) {
         this.mapping = new Map<MessageType, DispachInfo[]>()
@@ -115,6 +187,7 @@ export class Dispatcher {
         this.hearbeatInterval = undefined
 
         this.store = store
+
 
 
     }
@@ -135,7 +208,7 @@ export class Dispatcher {
         const dispatchInfos = this.mapping.get(typ)
         const newDispatchInfo = { callback: callback, verifySender: !!verifySender, acceptOnlyEncrypted: !!acceptOnlyEcrypted, contentTopic: contentTopic ? contentTopic : this.contentTopic, storeLocally: storeLocally === undefined ? true : storeLocally}
         if (dispatchInfos?.find((di) => di.callback.toString() == newDispatchInfo.callback.toString())) {
-            console.warn("Skipping the callback setup - already exists")
+            this.logger.warn("Skipping the callback setup - already exists")
             return
         }
 
@@ -154,8 +227,8 @@ export class Dispatcher {
         await this.node.waitForPeers([Protocols.LightPush, Protocols.Filter, Protocols.Store])
         
         this.node.libp2p.addEventListener("peer:disconnect", async (e:any) => {
-            console.debug("Peer disconnected, check subscription!")
-            console.debug(e.detail.toString())
+            this.logger.debug("Peer disconnected, check subscription!")
+            this.logger.debug(e.detail.toString())
             //await this.checkSubscription()
         })
         this.hearbeatInterval = setInterval(() => this.dispatchRegularQuery(), 10000)
@@ -174,16 +247,16 @@ export class Dispatcher {
      */
     initContentTopic = async (contentTopic:string) => {
         this.contentTopic = contentTopic
-        this.encoderEphemeral = createEncoder({ contentTopic: contentTopic, ephemeral: true })
-        this.encoder = createEncoder({ contentTopic: contentTopic, ephemeral: false,  })
-        this.decoder = createDecoder(contentTopic)
+        this.encoderEphemeral = this.node.createEncoder({ contentTopic: contentTopic, ephemeral: true })
+        this.encoder = this.node.createEncoder({ contentTopic: contentTopic, ephemeral: false,  })
+        this.decoder = this.node.createDecoder({contentTopic: contentTopic})
 
         const decoders = [this.decoder]
 
         for (const di of this.mapping.values()) {
             for (const i of di) {
                 if (i.contentTopic != contentTopic) {
-                    decoders.push(createDecoder(i.contentTopic))
+                    decoders.push(this.node.createDecoder({contentTopic: i.contentTopic}))
                 }
             }
         }
@@ -234,11 +307,11 @@ export class Dispatcher {
 
     private checkDuplicate = (hash: string):boolean => {
         if (this.msgHashes.indexOf(hash) >= 0) {
-            console.debug("Message already delivered")
+            this.logger.debug("Message already delivered")
             return true
         }
         if (this.msgHashes.length > 2000) {
-            console.debug("Dropping old messages from hash cache")
+            this.logger.debug("Dropping old messages from hash cache")
             this.msgHashes.slice(hash.length - 500, hash.length)
         }
         this.msgHashes.push(hash)
@@ -261,7 +334,7 @@ export class Dispatcher {
                     encrypted = true
                     break
                 } catch (e) {
-                    console.debug("Failed to decrypt: " + e)
+                    this.logger.debug("Failed to decrypt: " + e)
                 }
   
             }
@@ -272,13 +345,13 @@ export class Dispatcher {
 
     private verifySender = (dmsg: IDispatchMessage): boolean => {
         if (!dmsg.signature) {
-            console.error(`${dmsg.type}: Message requires verification, but signature is empty!`)
+            this.logger.error(`${dmsg.type}: Message requires verification, but signature is empty!`)
             return false
         }
         const dmsgToVerify: IDispatchMessage = { type: dmsg.type, payload: dmsg.payload, timestamp: dmsg.timestamp, signature: undefined, signer: dmsg.signer, }
         const signer = ethers.verifyMessage(JSON.stringify(dmsgToVerify), dmsg.signature)
         if (signer != dmsg.signer) {
-            console.error(`${dmsg.type}: Invalid signer ${dmsg.signer} != ${signer}`)
+            this.logger.error(`${dmsg.type}: Invalid signer ${dmsg.signer} != ${signer}`)
             return false
         }
 
@@ -332,18 +405,18 @@ export class Dispatcher {
             const dispatchInfos = this.mapping.get(dmsg.type)
 
             if (!dispatchInfos) {
-                console.error("Undefined callback for " + dmsg.type)
+                this.logger.error("Undefined callback for " + dmsg.type)
                 return
             }
 
             for (const dispatchInfo of dispatchInfos) {
                 if (dispatchInfo.acceptOnlyEncrypted && !encrypted) {
-                    console.info(`Message not encrypted, skipping (type: ${dmsg.type})`)
+                    this.logger.info(`Message not encrypted, skipping (type: ${dmsg.type})`)
                     continue
                 }
 
                 if (dispatchInfo.contentTopic != msg.contentTopic) {
-                    console.log(`Content topic mismatch ${dispatchInfo.contentTopic} != ${msg.contentTopic}`)
+                    this.logger.info(`Content topic mismatch ${dispatchInfo.contentTopic} != ${msg.contentTopic}`)
                     continue
                 }
 
@@ -351,7 +424,7 @@ export class Dispatcher {
 
                 if (dispatchInfo.verifySender) {
                     if (!this.verifySender(dmsg)) {
-                        console.debug("failed to verify sender")
+                        this.logger.debug("failed to verify sender")
                         continue
                     }
                 }
@@ -375,7 +448,7 @@ export class Dispatcher {
                 
             }
         } catch (e) {
-            console.debug(e)
+            this.logger.debug(e)
         }
     }
 
@@ -506,7 +579,7 @@ export class Dispatcher {
             try {
             this.store.set(msg)
             } catch (e) {
-                console.error(e)
+                this.logger.error(e)
             }
         }
     }
@@ -519,7 +592,6 @@ export class Dispatcher {
             throw new Error("ContentTopic not initialized")
         }
 
-        console.log(this.contentTopic, this.decoder.contentTopic)
         let msg
         let start = new Date(0)
         let messages = await this.getLocalMessages()
@@ -562,7 +634,6 @@ export class Dispatcher {
         if (!this.decoder) {
             throw new Error("ContentTopic not initialized")
         }
-        console.log(options)
 
         for await (const messagesPromises of this.node.store.queryGenerator(
             [this.decoder],
@@ -573,15 +644,13 @@ export class Dispatcher {
                     .map(async (p) => {
                         const msg = await p;
                         if (msg)
-                            console.log(msg)
+                            this.logger.debug(msg)
                             await this.dispatch(msg!, !live)
                     })
             );
         }
 
-        console.log("Query done")
-
-
+        this.logger.debug("Query done")
     }
 
     /**
@@ -596,14 +665,21 @@ export class Dispatcher {
             await this.dispatchQuery({paginationForward: true, paginationLimit: 100, includeData: true, pubsubTopic: this.decoder.pubsubTopic, contentTopics: [this.contentTopic], timeStart: new Date(start.setTime(start.getTime()-300*1000)), timeEnd: new Date()})
             this.lastSuccessfulQuery = new Date()
         } catch (ex) {
-            console.error(ex)            
+            this.logger.error(ex)
         }
     }
 
     clearDuplicateCache = () => {
         this.msgHashes = []
     }
-
+    
+        /**
+         * Sets the logging level for the dispatcher
+         * @param level The log level to set (0-3, where 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG)
+         */
+        setLogLevel(level: LogLevel): void {
+            this.logger.setLevel(level);
+        }
     /**
      * TBD
      * @returns 
@@ -615,7 +691,7 @@ export class Dispatcher {
             const l = this.emitCache.length
             for (let i = 0; i < l; i++) {
                 const toEmit = this.emitCache[0]
-                console.info("Trying to emit failed message from "+toEmit.msg.timestamp)
+                this.logger.info("Trying to emit failed message from "+toEmit.msg.timestamp)
                 const res = await this.node.lightPush.send(toEmit.encoder, toEmit.msg)
                 if (res && res.failures && res.failures.length > 0) {
                     break
@@ -671,9 +747,3 @@ function reviver(key: any, value: any) {
 async function sleep(msec: number) {
 	return await new Promise((r) => setTimeout(r, msec))
 }
-
-/*function toHexString(byteArray: any) {
-    return Array.from(byteArray, function(byte: any) {
-      return ('0' + (byte & 0xFF).toString(16)).slice(-2);
-    }).join('')
-  }*/
