@@ -363,7 +363,7 @@ export class Dispatcher {
         let wakuPayload = new Uint8Array()
         
         if (payload instanceof Uint8Array) {
-            wakuPayload = payload
+            wakuPayload = payload as Uint8Array<ArrayBuffer>
         } else {
             wakuPayload = new Uint8Array(Object.values(payload));
         }
